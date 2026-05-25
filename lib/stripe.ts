@@ -1,12 +1,16 @@
 import Stripe from "stripe"
 
-export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2025-03-31.basil" as any,
-})
-
-export const PRO_PLAN_PRICE_ID = "price_pro_monthly" // Created in Stripe Dashboard
+function getStripe(): Stripe | null {
+  if (!process.env.STRIPE_SECRET_KEY) return null
+  return new Stripe(process.env.STRIPE_SECRET_KEY, {
+    apiVersion: "2025-03-31.basil" as any,
+  })
+}
 
 export function createCheckoutSession(customerEmail?: string) {
+  const stripe = getStripe()
+  if (!stripe) throw new Error("Stripeが設定されていません")
+
   return stripe.checkout.sessions.create({
     mode: "subscription",
     payment_method_types: ["card"],
@@ -29,6 +33,8 @@ export function createCheckoutSession(customerEmail?: string) {
 }
 
 export async function getSubscriptionStatus(sessionId: string) {
+  const stripe = getStripe()
+  if (!stripe) throw new Error("Stripeが設定されていません")
   const session = await stripe.checkout.sessions.retrieve(sessionId, {
     expand: ["subscription"],
   })
