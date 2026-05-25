@@ -7,16 +7,16 @@ export default function CommercialLawPage() {
       <div className="text-sm text-zinc-600 space-y-4 leading-relaxed">
         <div className="grid grid-cols-[120px_1fr] gap-3">
           <p className="font-semibold text-zinc-700">販売業者</p>
-          <p>Sio</p>
+          <p>Arata</p>
 
           <p className="font-semibold text-zinc-700">運営責任者</p>
-          <p>Sio</p>
+          <p>Arata</p>
 
           <p className="font-semibold text-zinc-700">所在地</p>
-          <p>ご請求があれば遅滞なく開示します（X: @sio_rises）</p>
+          <p>ご請求があれば遅滞なく開示します（contact@endoarata.jp）</p>
 
           <p className="font-semibold text-zinc-700">連絡先</p>
-          <p>X（Twitter）: @sio_rises</p>
+          <p>contact@endoarata.jp</p>
 
           <p className="font-semibold text-zinc-700">販売価格</p>
           <p>プロプラン: 月額980円（税込）<br/>ビジネスプラン: 月額2,980円（税込）</p>

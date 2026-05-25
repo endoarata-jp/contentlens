@@ -23,7 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <a href="/terms" className="hover:text-zinc-600">利用規約</a>
             <a href="/commercial-law" className="hover:text-zinc-600">特定商取引法に基づく表記</a>
           </div>
-          <p className="mt-1">© 2026 ContentLens</p>
+          <p className="mt-1">© 2026 ContentLens · contact@endoarata.jp</p>
         </footer>
       </body>
     </html>

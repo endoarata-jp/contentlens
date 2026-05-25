@@ -23,7 +23,7 @@ export default function PrivacyPage() {
         <p>法令に基づく場合を除き、ユーザーの同意なく個人情報を第三者に提供することはありません。決済処理はStripe社に委託しており、同社のプライバシーポリシーが適用されます。</p>
 
         <h2 className="text-base font-semibold text-zinc-800 mt-6">4. お問い合わせ</h2>
-        <p>本ポリシーに関するお問い合わせは X: @sio_rises までご連絡ください。</p>
+        <p>本ポリシーに関するお問い合わせは contact@endoarata.jp までご連絡ください。</p>
 
         <p className="mt-8 text-xs text-zinc-400">制定日: 2026年5月25日</p>
       </div>
