@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect } from "react"
+import { supabase, canUserAnalyze, incrementUsage, getSubscription } from "@/lib/supabase"
 
 interface AnalysisResult {
   overallScore: number
@@ -18,53 +19,6 @@ interface FactCheckResult {
   verdict: "verified" | "unverified" | "false" | "opinion"
   evidence: string
   sources: { title: string; url: string; snippet: string }[]
-}
-
-interface UsageState { count: number; resetDate: string; subscription: null | { customerId: string; status: string } }
-const FREE_LIMIT = 3
-const STORAGE_KEY = "contentlens_usage"
-const TOKEN_KEY = "contentlens_token"
-
-function loadUsage(): UsageState | null {
-  if (typeof window === "undefined") return null
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return JSON.parse(raw)
-  } catch {}
-  return null
-}
-
-function saveUsage(state: UsageState) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-}
-
-function canAnalyze(state: UsageState | null): boolean {
-  if (!state) return true
-  if (state.subscription?.status === "active") return true
-  const now = new Date()
-  if (new Date(state.resetDate) <= now) return true
-  return state.count < FREE_LIMIT
-}
-
-function incrementUsage(state: UsageState | null): UsageState {
-  const now = new Date()
-  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString()
-  if (!state || new Date(state.resetDate) <= now) {
-    const s: UsageState = { count: 1, resetDate: nextMonth, subscription: null }
-    saveUsage(s)
-    return s
-  }
-  const s: UsageState = { ...state, count: state.count + 1 }
-  saveUsage(s)
-  return s
-}
-
-function remainingAnalyses(state: UsageState | null): number | "∞" {
-  if (!state) return FREE_LIMIT
-  if (state.subscription?.status === "active") return "∞"
-  const now = new Date()
-  if (new Date(state.resetDate) <= now) return FREE_LIMIT
-  return Math.max(0, FREE_LIMIT - state.count)
 }
 
 const VERDICT_MAP: Record<string, { label: string; color: string }> = {
@@ -98,33 +52,89 @@ export default function Home() {
   const [facts, setFacts] = useState<FactCheckResult[]>([])
   const [error, setError] = useState("")
   const [activeTab, setActiveTab] = useState<"analysis" | "facts">("analysis")
-  const [usage, setUsage] = useState<UsageState | null>(null)
   const [checkoutLoading, setCheckoutLoading] = useState(false)
 
+  // Auth state
+  const [user, setUser] = useState<any>(null)
+  const [email, setEmail] = useState("")
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login")
+  const [authLoading, setAuthLoading] = useState(false)
+  const [authMsg, setAuthMsg] = useState("")
+
+  // Subscription + usage
+  const [isPaid, setIsPaid] = useState(false)
+  const [remaining, setRemaining] = useState<number>(3)
+  const [canUse, setCanUse] = useState(true)
+
   useEffect(() => {
-    setUsage(loadUsage())
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setUser(session.user)
+        refreshState(session.user.id)
+      }
+    })
     // Handle Stripe redirect
     const params = new URLSearchParams(window.location.search)
-    const sessionId = params.get("session_id")
-    const status = params.get("status")
-    if (sessionId && status === "success") {
-      const sub: UsageState = {
-        count: 0,
-        resetDate: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 1).toISOString(),
-        subscription: { customerId: sessionId, status: "active" },
-      }
-      saveUsage(sub)
-      setUsage(sub)
+    if (params.get("status") === "success") {
       window.history.replaceState({}, "", "/")
+      if (user) refreshState(user.id)
     }
   }, [])
 
-  const remaining = remainingAnalyses(usage)
-  const isPaid = usage?.subscription?.status === "active"
+  async function refreshState(userId: string) {
+    const sub = await getSubscription(userId)
+    setIsPaid(!!sub)
+    const ok = await canUserAnalyze(userId)
+    setCanUse(ok)
+    // Calculate remaining
+    try {
+      const { data } = await supabase.from("usage").select("count").eq("user_id", userId).single()
+      if (sub) setRemaining(999)
+      else setRemaining(Math.max(0, 3 - (data?.count || 0)))
+    } catch {
+      setRemaining(sub ? 999 : 3)
+    }
+  }
+
+  const handleAuth = async () => {
+    setAuthLoading(true)
+    setAuthMsg("")
+    try {
+      const { data, error: authError } = authMode === "signup"
+        ? await supabase.auth.signUp({ email, password: "temp123456" })
+        : await supabase.auth.signInWithPassword({ email, password: "temp123456" })
+      
+      if (authError) {
+        if (authMode === "login") {
+          // Try magic link instead
+          const { error: mlError } = await supabase.auth.signInWithOtp({ email })
+          if (mlError) throw mlError
+          setAuthMsg("ログインリンクをメールで送信しました。メールを確認してください。")
+        } else {
+          throw authError
+        }
+      } else if (data.user) {
+        setUser(data.user)
+        refreshState(data.user.id)
+      }
+    } catch (e: any) {
+      setAuthMsg(e.message || "認証エラー")
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const logout = async () => {
+    await supabase.auth.signOut()
+    setUser(null)
+    setIsPaid(false)
+    setRemaining(3)
+    setCanUse(true)
+  }
 
   const analyze = async () => {
     if (!article) { setError("記事を入力してください"); return }
-    if (!canAnalyze(usage)) {
+    if (!canUse) {
       setError("無料枠を使い切りました。Proプランにアップグレードしてください。")
       return
     }
@@ -141,7 +151,10 @@ export default function Home() {
       const [aData, fData] = await Promise.all([aRes.json(), fRes.json()])
       if (aRes.ok && !aData.error) {
         setAnalysis(aData)
-        setUsage(incrementUsage(usage))
+        if (user) {
+          await incrementUsage(user.id)
+          refreshState(user.id)
+        }
       }
       if (fRes.ok && Array.isArray(fData)) setFacts(fData)
       if (!aRes.ok && !fRes.ok) setError(aData.error || "分析に失敗しました")
@@ -158,7 +171,7 @@ export default function Home() {
       const res = await fetch("/api/create-checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ email: user?.email }),
       })
       const data = await res.json()
       if (data.url) window.location.href = data.url
@@ -177,22 +190,46 @@ export default function Home() {
       <div className="mb-8 text-center">
         <h1 className="text-3xl font-bold text-zinc-900">ContentLens</h1>
         <p className="mt-2 text-zinc-500">AI記事の品質を5軸で採点。独自性・EEAT・事実検証。</p>
-        <div className="mt-3 flex items-center justify-center gap-2">
-          {isPaid ? (
-            <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-700">Proプラン</span>
-          ) : (
-            <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-600">無料プラン</span>
-          )}
-          <span className="text-xs text-zinc-400">残り {remaining} 回</span>
-          {!isPaid && (
-            <button onClick={upgrade} disabled={checkoutLoading} className="rounded-full bg-violet-600 px-3 py-1 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-50">
-              {checkoutLoading ? "..." : "Proにアップグレード"}
+
+        {user ? (
+          <div className="mt-3 flex items-center justify-center gap-2">
+            {isPaid ? (
+              <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-700">Proプラン</span>
+            ) : (
+              <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-600">無料プラン</span>
+            )}
+            <span className="text-xs text-zinc-400">残り {remaining} 回</span>
+            {!isPaid && (
+              <button onClick={upgrade} disabled={checkoutLoading} className="rounded-full bg-violet-600 px-3 py-1 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-50">
+                {checkoutLoading ? "..." : "Proにアップグレード"}
+              </button>
+            )}
+            <button onClick={logout} className="text-xs text-zinc-400 hover:text-zinc-600 ml-1">ログアウト</button>
+          </div>
+        ) : (
+          <div className="mt-4 inline-flex flex-col items-center gap-2">
+            <div className="flex gap-2">
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="メールアドレス"
+                className="rounded-lg border border-zinc-200 px-4 py-2 text-sm w-56"
+              />
+              <button onClick={handleAuth} disabled={authLoading || !email} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50">
+                {authLoading ? "..." : authMode === "login" ? "ログイン" : "登録"}
+              </button>
+            </div>
+            <button onClick={() => setAuthMode(authMode === "login" ? "signup" : "login")} className="text-xs text-zinc-400 hover:text-violet-600">
+              {authMode === "login" ? "新規登録はこちら" : "ログインはこちら"}
             </button>
-          )}
-        </div>
+            {authMsg && <p className="text-xs text-violet-600">{authMsg}</p>}
+            <p className="text-[10px] text-zinc-300 mt-1">メールアドレスを入力するとログインリンクが届きます</p>
+          </div>
+        )}
       </div>
 
-      {!isPaid && remaining === 0 && (
+      {!isPaid && remaining === 0 && user && (
         <div className="rounded-xl border-2 border-violet-200 bg-violet-50 p-6 mb-6 text-center">
           <p className="text-sm font-medium text-violet-800">無料枠を使い切りました</p>
           <p className="text-xs text-violet-600 mt-1">月980円で無制限に分析できます</p>
@@ -212,7 +249,7 @@ export default function Home() {
         />
         <button
           onClick={analyze}
-          disabled={loading || (!isPaid && remaining === 0)}
+          disabled={loading || (user && !canUse)}
           className="w-full rounded-lg bg-violet-600 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-violet-700 disabled:opacity-50"
         >
           {loading ? "分析中..." : "品質を分析する"}
@@ -320,6 +357,7 @@ export default function Home() {
           <p className="text-xs font-medium text-zinc-500">ビジネス</p>
           <p className="text-2xl font-bold text-zinc-900 mt-1">¥2,980</p>
           <p className="text-xs text-zinc-400 mt-1">/月・API利用可</p>
+          <p className="text-[10px] text-zinc-300 mt-1">REST API・一括分析・CMS連携</p>
         </div>
       </div>
     </main>
