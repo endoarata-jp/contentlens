@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useCallback } from "react"
 
 interface AnalysisResult {
   overallScore: number
@@ -18,6 +18,53 @@ interface FactCheckResult {
   verdict: "verified" | "unverified" | "false" | "opinion"
   evidence: string
   sources: { title: string; url: string; snippet: string }[]
+}
+
+interface UsageState { count: number; resetDate: string; subscription: null | { customerId: string; status: string } }
+const FREE_LIMIT = 3
+const STORAGE_KEY = "contentlens_usage"
+const TOKEN_KEY = "contentlens_token"
+
+function loadUsage(): UsageState | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) return JSON.parse(raw)
+  } catch {}
+  return null
+}
+
+function saveUsage(state: UsageState) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+}
+
+function canAnalyze(state: UsageState | null): boolean {
+  if (!state) return true
+  if (state.subscription?.status === "active") return true
+  const now = new Date()
+  if (new Date(state.resetDate) <= now) return true
+  return state.count < FREE_LIMIT
+}
+
+function incrementUsage(state: UsageState | null): UsageState {
+  const now = new Date()
+  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString()
+  if (!state || new Date(state.resetDate) <= now) {
+    const s: UsageState = { count: 1, resetDate: nextMonth, subscription: null }
+    saveUsage(s)
+    return s
+  }
+  const s: UsageState = { ...state, count: state.count + 1 }
+  saveUsage(s)
+  return s
+}
+
+function remainingAnalyses(state: UsageState | null): number | "∞" {
+  if (!state) return FREE_LIMIT
+  if (state.subscription?.status === "active") return "∞"
+  const now = new Date()
+  if (new Date(state.resetDate) <= now) return FREE_LIMIT
+  return Math.max(0, FREE_LIMIT - state.count)
 }
 
 const VERDICT_MAP: Record<string, { label: string; color: string }> = {
@@ -51,9 +98,36 @@ export default function Home() {
   const [facts, setFacts] = useState<FactCheckResult[]>([])
   const [error, setError] = useState("")
   const [activeTab, setActiveTab] = useState<"analysis" | "facts">("analysis")
+  const [usage, setUsage] = useState<UsageState | null>(null)
+  const [checkoutLoading, setCheckoutLoading] = useState(false)
+
+  useEffect(() => {
+    setUsage(loadUsage())
+    // Handle Stripe redirect
+    const params = new URLSearchParams(window.location.search)
+    const sessionId = params.get("session_id")
+    const status = params.get("status")
+    if (sessionId && status === "success") {
+      const sub: UsageState = {
+        count: 0,
+        resetDate: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 1).toISOString(),
+        subscription: { customerId: sessionId, status: "active" },
+      }
+      saveUsage(sub)
+      setUsage(sub)
+      window.history.replaceState({}, "", "/")
+    }
+  }, [])
+
+  const remaining = remainingAnalyses(usage)
+  const isPaid = usage?.subscription?.status === "active"
 
   const analyze = async () => {
     if (!article) { setError("記事を入力してください"); return }
+    if (!canAnalyze(usage)) {
+      setError("無料枠を使い切りました。Proプランにアップグレードしてください。")
+      return
+    }
     setLoading(true)
     setError("")
     setAnalysis(null)
@@ -65,13 +139,34 @@ export default function Home() {
         fetch("/api/check-facts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ article }) }),
       ])
       const [aData, fData] = await Promise.all([aRes.json(), fRes.json()])
-      if (aRes.ok && !aData.error) setAnalysis(aData)
+      if (aRes.ok && !aData.error) {
+        setAnalysis(aData)
+        setUsage(incrementUsage(usage))
+      }
       if (fRes.ok && Array.isArray(fData)) setFacts(fData)
       if (!aRes.ok && !fRes.ok) setError(aData.error || "分析に失敗しました")
     } catch {
       setError("リクエストに失敗しました")
     } finally {
       setLoading(false)
+    }
+  }
+
+  const upgrade = async () => {
+    setCheckoutLoading(true)
+    try {
+      const res = await fetch("/api/create-checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      })
+      const data = await res.json()
+      if (data.url) window.location.href = data.url
+      else setError(data.error || "決済の開始に失敗しました")
+    } catch {
+      setError("決済の開始に失敗しました")
+    } finally {
+      setCheckoutLoading(false)
     }
   }
 
@@ -82,7 +177,30 @@ export default function Home() {
       <div className="mb-8 text-center">
         <h1 className="text-3xl font-bold text-zinc-900">ContentLens</h1>
         <p className="mt-2 text-zinc-500">AI記事の品質を5軸で採点。独自性・EEAT・事実検証。</p>
+        <div className="mt-3 flex items-center justify-center gap-2">
+          {isPaid ? (
+            <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-700">Proプラン</span>
+          ) : (
+            <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-600">無料プラン</span>
+          )}
+          <span className="text-xs text-zinc-400">残り {remaining} 回</span>
+          {!isPaid && (
+            <button onClick={upgrade} disabled={checkoutLoading} className="rounded-full bg-violet-600 px-3 py-1 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-50">
+              {checkoutLoading ? "..." : "Proにアップグレード"}
+            </button>
+          )}
+        </div>
       </div>
+
+      {!isPaid && remaining === 0 && (
+        <div className="rounded-xl border-2 border-violet-200 bg-violet-50 p-6 mb-6 text-center">
+          <p className="text-sm font-medium text-violet-800">無料枠を使い切りました</p>
+          <p className="text-xs text-violet-600 mt-1">月980円で無制限に分析できます</p>
+          <button onClick={upgrade} disabled={checkoutLoading} className="mt-3 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50">
+            {checkoutLoading ? "処理中..." : "Proにアップグレード (¥980/月)"}
+          </button>
+        </div>
+      )}
 
       <div className="rounded-xl border border-zinc-200 bg-white p-6 mb-6">
         <textarea
@@ -94,7 +212,7 @@ export default function Home() {
         />
         <button
           onClick={analyze}
-          disabled={loading}
+          disabled={loading || (!isPaid && remaining === 0)}
           className="w-full rounded-lg bg-violet-600 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-violet-700 disabled:opacity-50"
         >
           {loading ? "分析中..." : "品質を分析する"}
@@ -182,7 +300,7 @@ export default function Home() {
       {!analysis && !loading && (
         <div className="rounded-xl border border-dashed border-zinc-200 bg-white p-12 text-center">
           <p className="text-zinc-400">記事を貼り付けて「品質を分析する」をクリックしてください</p>
-          <p className="mt-1 text-xs text-zinc-300">AIが5軸の品質スコア + 事実検証を提供します</p>
+          <p className="mt-1 text-xs text-zinc-300">無料プランでは月3回まで分析できます</p>
         </div>
       )}
 
